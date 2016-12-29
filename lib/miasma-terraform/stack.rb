@@ -5,6 +5,34 @@ require 'fileutils'
 module MiasmaTerraform
   class Stack
 
+    @@running_actions = []
+
+    # Register action to be cleaned up at exit
+    #
+    # @param action [Action]
+    # @return [NilClass]
+    def self.register_action(action)
+      unless(@@running_actions.include?(action))
+        @@running_actions.push(action)
+      end
+      nil
+    end
+
+    # Deregister action from at exit cleanup
+    #
+    # @param action [Action]
+    # @return [NilClass]
+    def self.deregister_action(action)
+      @@running_actions.delete(action)
+      nil
+    end
+
+    # Wait for all actions to complete
+    def self.cleanup_actions!
+      @@running_actions.map(&:complete!)
+      nil
+    end
+
     # @return [Array<String>]
     def self.list(container)
       if(container.to_s.empty?)
@@ -32,6 +60,11 @@ module MiasmaTerraform
     class Action
       attr_reader :stdin, :waiter, :command
 
+      # Create a new action to run
+      #
+      # @param command [String]
+      # @param opts [Hash]
+      # @return [self]
       def initialize(command, opts={})
         @command = command.dup.freeze
         @options = opts.to_smash
@@ -47,8 +80,10 @@ module MiasmaTerraform
         end
       end
 
+      # Start the process
       def start!
         opts = Hash[@options.map{|k,v| [k.to_sym,v]}]
+        MiasmaTerraform::Stack.register_action(self)
         @stdin, @stdout, @stderr, @waiter = Open3.popen3(@command, **opts)
         @start_callbacks.each do |callback|
           callback.call(self)
@@ -59,16 +94,20 @@ module MiasmaTerraform
         true
       end
 
+      # Wait for the process to complete
+      #
+      # @return [Process::Status]
       def complete!
         start! unless waiter
         if(@process_manager)
           @process_manager.join
-          waiter.value
-        else
-          waiter.value
         end
+        result = waiter.value
+        MiasmaTerraform::Stack.deregister_action(self)
+        result
       end
 
+      # @return [IO] stderr stream
       def stderr
         if(@stderr == :managed_io)
           @cached_output[:stderr]
@@ -77,6 +116,7 @@ module MiasmaTerraform
         end
       end
 
+      # @return [IO] stdout stream
       def stdout
         if(@stdout == :managed_io)
           @cached_output[:stdout]
@@ -85,14 +125,26 @@ module MiasmaTerraform
         end
       end
 
+      # Register a block to be run when process output
+      # is received
+      #
+      # @yieldparam line [String] output line
+      # @yieldparam type [Symbol] output type (:stdout or :stderr)
       def on_io(&block)
         @io_callbacks << block
       end
 
+      # Register a block to be run when a process completes
+      #
+      # @yieldparam result [Process::Status]
+      # @yieldparam self [Action]
       def on_complete(&block)
         @complete_callbacks << block
       end
 
+      # Register a block to be run when a process starts
+      #
+      # @yieldparam self [Action]
       def on_start(&block)
         @start_callbacks << block
       end
@@ -135,9 +187,9 @@ module MiasmaTerraform
             @complete_callbacks.each do |callback|
               callback.call(result, self)
             end
+            MiasmaTerraform::Stack.deregister_action(self)
             result
           end
-          Kernel.at_exit{ @process_manager.join }
         end
       end
     end
@@ -492,3 +544,5 @@ module MiasmaTerraform
 
   end
 end
+
+Kernel.at_exit{ MiasmaTerraform::Stack.cleanup_actions! }

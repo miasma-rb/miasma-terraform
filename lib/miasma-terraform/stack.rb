@@ -1,6 +1,7 @@
 require 'open3'
 require 'stringio'
 require 'fileutils'
+require 'tempfile'
 
 module MiasmaTerraform
   class Stack
@@ -226,38 +227,35 @@ module MiasmaTerraform
     def save(opts={})
       save_opts = opts.to_smash
       type = exists? ? "update" : "create"
-      if(lock_stack(:exclusive))
-        File.write(tf_path, save_opts[:template].to_json)
-        File.write(tfvars_path, save_opts[:parameters].to_json)
-        action = run_action('apply')
-        store_events(action)
-        action.on_start do |_|
-          update_info do |info|
-            info["state"] = "#{type}_in_progress"
-            info
-          end
+      lock_stack
+      write_file(tf_path, save_opts[:template].to_json)
+      write_file(tfvars_path, save_opts[:parameters].to_json)
+      action = run_action('apply')
+      store_events(action)
+      action.on_start do |_|
+        update_info do |info|
+          info["state"] = "#{type}_in_progress"
+          info
         end
-        action.on_complete do |status, this_action|
-          update_info do |info|
-            if(type == "create")
-              info["created_at"] = (Time.now.to_f * 1000).floor
-            end
-            info["updated_at"] = (Time.now.to_f * 1000).floor
-            info["state"] = status.success? ? "#{type}_complete" : "#{type}_failed"
-            info
-          end
-          unlock_stack
-        end
-        action.start!
-        true
-      else
-        raise Error::Busy.new "Failed to lock stack"
       end
+      action.on_complete do |status, this_action|
+        update_info do |info|
+          if(type == "create")
+            info["created_at"] = (Time.now.to_f * 1000).floor
+          end
+          info["updated_at"] = (Time.now.to_f * 1000).floor
+          info["state"] = status.success? ? "#{type}_complete" : "#{type}_failed"
+          info
+        end
+        unlock_stack
+      end
+      action.start!
+      true
     end
 
     # @return [Array<Hash>] resource list
     def resources
-      must_exist(:locked) do
+      must_exist do
         if(has_state?)
           action = run_action('state list', :auto_start)
           # wait for action to complete
@@ -308,7 +306,7 @@ module MiasmaTerraform
 
     # @return [Hash] stack outputs
     def outputs
-      must_exist(:locked) do
+      must_exist do
         if(has_state?)
           action = run_action('output -json', :auto_start)
           action.complete!
@@ -337,7 +335,7 @@ module MiasmaTerraform
 
     # @return [Hash] stack information
     def info
-      must_exist(:locked) do
+      must_exist do
         stack_data = load_info
         Smash.new(
           :id => name,
@@ -358,7 +356,7 @@ module MiasmaTerraform
     # @return [TrueClass] destroy this stack
     def destroy!
       must_exist do
-        lock_stack(:exclusive)
+        lock_stack
         action = run_action('destroy -force')
         action.on_start do |_|
           update_info do |info|
@@ -366,19 +364,20 @@ module MiasmaTerraform
             info
           end
         end
+        action.on_complete do |*_|
+          unlock_stack
+        end
         action.on_complete do |result, _|
           unless(result.success?)
             update_info do |info|
               info[:state] = "delete_failed"
               info
             end
+          else
+            FileUtils.rm_rf(directory)
           end
         end
-        action.complete!
-        unlock_stack
-        successful_action(action) do
-          FileUtils.rm_rf(directory)
-        end
+        action.start!
       end
       true
     end
@@ -414,25 +413,20 @@ module MiasmaTerraform
     end
 
     # Lock stack and run block
-    def lock_stack(exclusive=false)
+    def lock_stack
       FileUtils.mkdir_p(directory)
-      if(!exclusive && @lock_file)
-        yield if block_given?
-      else
-        @lock_file = File.open(lock_path, File::RDWR|File::CREAT)
-        lock_type = exclusive ? File::LOCK_EX : File::LOCK_SH | File::LOCK_NB
-        if(@lock_file.flock(lock_type))
-          if(block_given?)
-            result = yield
-            @lock_file.flock(File::LOCK_UN)
-            @lock_file = nil
-            result
-          else
-            true
-          end
+      @lock_file = File.open(lock_path, File::RDWR|File::CREAT)
+      if(@lock_file.flock(File::LOCK_EX | File::LOCK_NB))
+        if(block_given?)
+          result = yield
+          @lock_file.flock(File::LOCK_UN)
+          @lock_file = nil
+          result
         else
-          raise Error::Busy.new 'Failed to aquire process lock.'
+          true
         end
+      else
+        raise Error::Busy.new "Failed to aquire process lock for `#{name}`. Stack busy."
       end
     end
 
@@ -492,7 +486,7 @@ module MiasmaTerraform
     # @return [TrueClass]
     def update_info
       result = yield(load_info)
-      File.write(info_path, result.to_json)
+      write_file(info_path, result.to_json)
       true
     end
 
@@ -540,6 +534,21 @@ module MiasmaTerraform
         raise ArgumentError.new("Missing required attributes: #{missing_attrs.sort}")
       end
       # TODO: Add tf bin check
+    end
+
+    # File write helper that proxies via temporary file
+    # to prevent corrupted writes on unexpected interrupt
+    #
+    # @param path [String] path to file
+    # @param contents [String] contents of file
+    # @return [TrueClass]
+    def write_file(path, contents=nil)
+      tmp_file = Tempfile.new('miasma')
+      yield(tmp_file) if block_given?
+      tmp_file.print(contents.to_s) if contents
+      tmp_file.close
+      FileUtils.mv(tmp_file.path, path)
+      true
     end
 
   end

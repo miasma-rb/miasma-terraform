@@ -14,11 +14,23 @@ module Miasma
             if(terraform_local_directory.to_s.empty?)
               raise ArgumentError.new 'Attribute `terraform_local_directory` must be set for local mode usage'
             end
-            memoize(stack.name, :direct) do
+            tf_stack = memoize(stack.name, :direct) do
               MiasmaTerraform::Stack.new(
                 :name => stack.name,
                 :container => terraform_local_directory
               )
+            end
+            if(block_given?)
+              begin
+                yield(tf_stack)
+              rescue MiasmaTerraform::Stack::Error::NotFound
+                raise Miasma::Error::ApiError::RequestError.new(
+                  "Failed to locate stack `#{stack.name}`",
+                  :response => OpenStruct.new(:code => 404)
+                )
+              end
+            else
+              tf_stack
             end
           end
 
@@ -42,8 +54,8 @@ module Miasma
           # @return [Models::Orchestration::Stack]
           def stack_reload(stack)
             if(stack.persisted?)
-              begin
-                s = terraform_stack(stack).info
+              terraform_stack(stack) do |tf_stack|
+                s = tf_stack.info
                 stack.load_data(
                   :id => s[:id],
                   :created => s[:creation_time].to_s.empty? ? nil : Time.at(s[:creation_time].to_i / 1000.0),
@@ -55,11 +67,6 @@ module Miasma
                   :updated => s[:updated_time].to_s.empty? ? nil : Time.at(s[:updated_time].to_i / 1000.0),
                   :outputs => s[:outputs].map{|k,v| {:key => k, :value => v}}
                 ).valid_state
-              rescue MiasmaTerraform::Stack::Error::NotFound
-                raise Miasma::Error::ApiError::RequestError.new(
-                  "Failed to locate stack `#{stack.name}`",
-                  :response => OpenStruct.new(:code => 404)
-                )
               end
             end
             stack
@@ -130,18 +137,20 @@ module Miasma
           # @param stack [Models::Orchestration::Stack]
           # @return [Array<Models::Orchestration::Stack::Resource>]
           def resource_all(stack)
-            terraform_stack(stack).resources.map do |resource|
-              Stack::Resource.new(
-                stack,
-                :id => resource[:physical_id],
-                :name => resource[:name],
-                :type => resource[:type],
-                :logical_id => resource[:name],
-                :state => resource[:status].downcase.to_sym,
-                :status => resource[:status],
-                :status_reason => resource[:resource_status_reason],
-                :updated => resource[:updated_time].to_s.empty? ? Time.now : Time.parse(resource[:updated_time])
-              ).valid_state
+            terraform_stack(stack) do |tf_stack|
+              tf_stack.resources.map do |resource|
+                Stack::Resource.new(
+                  stack,
+                  :id => resource[:physical_id],
+                  :name => resource[:name],
+                  :type => resource[:type],
+                  :logical_id => resource[:name],
+                  :state => resource[:status].downcase.to_sym,
+                  :status => resource[:status],
+                  :status_reason => resource[:resource_status_reason],
+                  :updated => resource[:updated_time].to_s.empty? ? Time.now : Time.parse(resource[:updated_time])
+                ).valid_state
+              end
             end
           end
 
@@ -160,18 +169,20 @@ module Miasma
           # @return [Array<Models::Orchestration::Stack::Event>]
           def event_all(stack, marker = nil)
             params = marker ? {:marker => marker} : {}
-            terraform_stack(stack).events.map do |event|
-              Stack::Event.new(
-                stack,
-                :id => event[:id],
-                :resource_id => event[:physical_resource_id],
-                :resource_name => event[:resource_name],
-                :resource_logical_id => event[:resource_name],
-                :resource_state => event[:resource_status].downcase.to_sym,
-                :resource_status => event[:resource_status],
-                :resource_status_reason => event[:resource_status_reason],
-                :time => Time.at(event[:timestamp] / 1000.0)
-              ).valid_state
+            terraform_stack(stack) do |tf_stack|
+              tf_stack.events.map do |event|
+                Stack::Event.new(
+                  stack,
+                  :id => event[:id],
+                  :resource_id => event[:physical_resource_id],
+                  :resource_name => event[:resource_name],
+                  :resource_logical_id => event[:resource_name],
+                  :resource_state => event[:resource_status].downcase.to_sym,
+                  :resource_status => event[:resource_status],
+                  :resource_status_reason => event[:resource_status_reason],
+                  :time => Time.at(event[:timestamp] / 1000.0)
+                ).valid_state
+              end
             end
           end
 

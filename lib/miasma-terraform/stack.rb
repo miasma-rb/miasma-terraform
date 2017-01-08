@@ -200,6 +200,7 @@ module MiasmaTerraform
     attr_reader :container
     attr_reader :name
     attr_reader :bin
+    attr_reader :scrub_destroyed
 
     def initialize(opts={})
       @options = opts.to_smash
@@ -207,6 +208,7 @@ module MiasmaTerraform
       @actions = []
       @name = @options[:name]
       @container = @options[:container]
+      @scrub_destroyed = @options.fetch(:scrub_destroyed, false)
       @directory = File.join(container, name)
       @bin = @options.fetch(:bin, 'terraform')
     end
@@ -388,7 +390,11 @@ module MiasmaTerraform
               info
             end
           else
-            FileUtils.rm_rf(directory)
+            update_info do |info|
+              info[:state] = "delete_complete"
+              info
+            end
+            FileUtils.rm_rf(directory) if scrub_destroyed
           end
         end
         action.start!

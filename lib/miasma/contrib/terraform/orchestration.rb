@@ -17,7 +17,8 @@ module Miasma
             tf_stack = memoize(stack.name, :direct) do
               MiasmaTerraform::Stack.new(
                 :name => stack.name,
-                :container => terraform_local_directory
+                :container => terraform_local_directory,
+                :scrub_destroyed => terraform_local_scrub_destroyed
               )
             end
             if(block_given?)
@@ -39,7 +40,26 @@ module Miasma
           # @param stack [Models::Orchestration::Stack]
           # @return [Models::Orchestration::Stack]
           def stack_save(stack)
-            tf_stack = terraform_stack(stack)
+            tf_stack = nil
+            begin
+              tf_stack = terraform_stack(stack) do |tf|
+                tf.info
+                tf
+              end
+            rescue Miasma::Error::ApiError::RequestError
+              if(stack.persisted?)
+                raise
+              else
+                tf_stack = nil
+              end
+            end
+            if(!stack.persisted? && tf_stack)
+              raise Miasma::Error::ApiError::RequestError.new(
+                "Stack already exists `#{stack.name}`",
+                :response => OpenStruct.new(:code => 405)
+              )
+            end
+            tf_stack = terraform_stack(stack) unless tf_stack
             tf_stack.save(
               :template => stack.template,
               :parameters => stack.parameters || {}

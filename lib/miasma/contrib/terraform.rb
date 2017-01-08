@@ -25,6 +25,7 @@ module Miasma
             attribute :terraform_boule_endpoint, String
             # Attributes required for local driver
             attribute :terraform_local_directory, String
+            attribute :terraform_local_scrub_destroyed, [TrueClass, FalseClass], :default => false
           end
         end
 

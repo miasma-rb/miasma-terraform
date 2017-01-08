@@ -59,7 +59,7 @@ module MiasmaTerraform
     REQUIRED_ATTRIBUTES = [:name, :container]
 
     class Action
-      attr_reader :stdin, :waiter, :command
+      attr_reader :stdin, :waiter, :command, :options
 
       # Create a new action to run
       #
@@ -133,6 +133,7 @@ module MiasmaTerraform
       # @yieldparam type [Symbol] output type (:stdout or :stderr)
       def on_io(&block)
         @io_callbacks << block
+        self
       end
 
       # Register a block to be run when a process completes
@@ -141,6 +142,7 @@ module MiasmaTerraform
       # @yieldparam self [Action]
       def on_complete(&block)
         @complete_callbacks << block
+        self
       end
 
       # Register a block to be run when a process starts
@@ -148,9 +150,10 @@ module MiasmaTerraform
       # @yieldparam self [Action]
       def on_start(&block)
         @start_callbacks << block
+        self
       end
 
-      private
+      protected
 
       # Start reader thread for handling managed process output
       def manage_process!
@@ -160,26 +163,23 @@ module MiasmaTerraform
             io_stderr = @stderr
             @stdout = @stderr = :managed_io
           end
-          Thread.abort_on_exception = true
           @process_manager = Thread.new do
             if(io_stdout && io_stderr)
-              begin
-                while(waiter.alive?)
-                  IO.select([io_stdout, io_stderr])
-                  [io_stdout, io_stderr].each do |io|
-                    begin
-                      content = io.read_nonblock(102400)
-                      type = io == io_stdout ? :stdout : :stderr
-                      @cached_output[type] << content
-                      content = content.split("\n")
-                      @io_callbacks.each do |callback|
-                        content.each do |line|
-                          callback.call(line, type)
-                        end
+              while(waiter.alive?)
+                IO.select([io_stdout, io_stderr])
+                [io_stdout, io_stderr].each do |io|
+                  begin
+                    content = io.read_nonblock(102400)
+                    type = io == io_stdout ? :stdout : :stderr
+                    @cached_output[type] << content
+                    content = content.split("\n")
+                    @io_callbacks.each do |callback|
+                      content.each do |line|
+                        callback.call(line, type)
                       end
-                    rescue IO::WaitReadable, EOFError
-                      # ignore
                     end
+                  rescue IO::WaitReadable, EOFError
+                    # ignore
                   end
                 end
               end
@@ -342,15 +342,29 @@ module MiasmaTerraform
           :name => name,
           :state => stack_data[:state].to_s,
           :status => stack_data[:state].to_s.upcase,
-          :updated_time => stack_data[:updated_at].to_s,
-          :creation_time => stack_data[:created_at].to_s,
+          :updated_time => stack_data[:updated_at],
+          :creation_time => stack_data[:created_at],
           :outputs => outputs
         )
       end
     end
 
-    def validate(*_)
-      raise NotImplementedError
+    def validate(template)
+      errors = []
+      root_path = Dir.mktmpdir('miasma-')
+      template_path = File.join(root_path, 'main.tf')
+      File.write(template_path, template)
+      action = run_action('validate')
+      action.options[:chdir] = root_path
+      action.on_io do |line, type|
+        if(line.start_with?('*'))
+          errors << line
+        end
+      end.on_complete do |_|
+        FileUtils.rm_rf(root_path)
+      end
+      action.complete!
+      errors
     end
 
     # @return [TrueClass] destroy this stack
@@ -453,17 +467,17 @@ module MiasmaTerraform
 
     # @return [String] path to internal info file
     def info_path
-      File.join(directory, 'info.json')
+      File.join(directory, '.info.json')
     end
 
     # @return [String] path to state file
-    def state_path
+    def tfstate_path
       File.join(directory, 'terraform.tfstate')
     end
 
     # @return [TrueClass, FalseClass] stack has state
     def has_state?
-      File.exists?(state_path)
+      File.exists?(tfstate_path)
     end
 
     # @return [String] path to lock file
@@ -491,8 +505,7 @@ module MiasmaTerraform
     end
 
     # Raise exception if action was not completed successfully
-    def successful_action(action=nil)
-      action = current_action unless action
+    def successful_action(action)
       status = action.complete!
       unless(status.success?)
         raise Error::CommandFailed.new "Command failed `#{action.command}` - #{action.stderr.read}"
@@ -553,5 +566,8 @@ module MiasmaTerraform
 
   end
 end
+
+# TODO: Don't be lazy and remove this setting
+Thread.abort_on_exception = true
 
 Kernel.at_exit{ MiasmaTerraform::Stack.cleanup_actions! }

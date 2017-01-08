@@ -30,10 +30,14 @@ module Miasma
         end
 
         def custom_setup(creds)
-          driver_module = Miasma::Models::Orchestration::Terraform.const_get(
-            Bogo::Utility.camel(creds[:terraform_driver].to_s)
-          )
-          extend driver_module
+          begin
+            driver_module = Miasma::Models::Orchestration::Terraform.const_get(
+              Bogo::Utility.camel(creds[:terraform_driver].to_s)
+            )
+            extend driver_module
+          rescue NameError
+            raise NotImplementedError.new "Requested driver not implemented `#{creds[:terraform_driver]}`"
+          end
         end
 
         def endpoint

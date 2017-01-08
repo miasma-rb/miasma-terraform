@@ -23,6 +23,8 @@ Miasma.api(
 
 ### Atlas attributes
 
+_NOTE: Atlas support not yet available_
+
 ```ruby
 Miasma.api(
   :type => :orchestration,

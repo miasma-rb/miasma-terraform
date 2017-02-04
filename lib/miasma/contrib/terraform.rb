@@ -16,11 +16,11 @@ module Miasma
         def self.included(klass)
           klass.class_eval do
             attribute :terraform_driver, String, :required => true,
-                      :allowed_values => ['atlas', 'boule', 'local'], :default => 'local',
+                      :allowed_values => ['tfe', 'boule', 'local'], :default => 'local',
                       :coerce => lambda{|v| v.to_s }
-            # Attributes required for Atlas driver
-            attribute :terraform_atlas_endpoint, String
-            attribute :terraform_atlas_token, String
+            # Attributes required for terraform enterprise driver
+            attribute :terraform_tfe_endpoint, String
+            attribute :terraform_tfe_token, String
             # Attributes required for Boule driver
             attribute :terraform_boule_endpoint, String
             # Attributes required for local driver
